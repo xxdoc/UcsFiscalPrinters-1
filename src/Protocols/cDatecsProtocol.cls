@@ -1261,7 +1261,7 @@ Public Function GetTotalsByPaymentTypes() As Variant
     Const CONF_NAME     As String = FUNC_NAME
     Dim vPmtSum         As Variant
     Dim vRevSum         As Variant
-    Dim vRetVal(0 To MAX_PMT_TYPE - 1) As Variant
+    Dim vRetVal(0 To MAX_PMT_TYPE - MIN_PMT_TYPE) As Variant
     Dim lIdx            As Long
     Dim lPmtIndex       As Long
     Dim eCmd            As UcsDatecsCommandsEnum
@@ -1519,7 +1519,7 @@ RetrySend:
     End If
     '--- read response
     sText = vbNullString
-    Do While Right$(sText, 1) <> Chr$(SYM_TERMINATOR)
+    Do
         If TimerEx > dblTimerEx + lTimeout / 1000# Then
             Error = pvConnectorError(ucsErrTimeoutWaitingForResponse)
             GoTo QH
@@ -1542,7 +1542,7 @@ RetrySend:
         If InStr(sBuffer, Chr$(SYM_SYN)) > 0 Then
             dblTimerEx = TimerEx
         End If
-    Loop
+    Loop While Right$(sText, 1) <> Chr$(SYM_TERMINATOR)
 RetryParse:
     '--- response complete w/ TERMINATOR (&H3)
     Debug.Assert Right$(sText, 1) = Chr$(SYM_TERMINATOR)
@@ -1614,7 +1614,9 @@ Private Function pvToWireLong(ByVal lValue As Long) As String
 End Function
 
 Private Function pvFromWireLong(baValue() As Byte) As Long
-    pvFromWireLong = (baValue(0) - &H30) * &H1000 + (baValue(2) - &H30) * &H100 + (baValue(4) - &H30) * &H10 + (baValue(6) - &H30)
+    If baValue(0) >= &H30 And baValue(2) >= &H30 And baValue(4) >= &H30 And baValue(6) >= &H30 Then
+        pvFromWireLong = (baValue(0) - &H30) * &H1000 + (baValue(2) - &H30) * &H100 + (baValue(4) - &H30) * &H10 + (baValue(6) - &H30)
+    End If
 End Function
 
 Private Sub pvSetStatus(sStatus As String)
@@ -1751,6 +1753,7 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
     Dim sDiscType       As String
     Dim sCodeType       As String
     Dim sCodeData       As String
+    Dim dLastDate       As Date
     
     On Error GoTo EH
     '--- ring sale
@@ -1774,6 +1777,27 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
             Else
                 .InitOperatorName = RTrim$(sData)
             End If
+            '--- for operator errors: if linked receipt in current Z-report -> print service deposit for non-cash payments
+            '---                      else -> print service deposit for total receipt amount
+            If LenB(.InitRevData(ucsRevReceiptNo)) <> 0 And .InitRevData(ucsRevType) = ucsFscRevOperatorError Then
+                If .InitRevData(ucsRevFiscalMemoryNo) = GetFiscalMemoryNo() Then
+                    pvGetCommandConfig CONF_NAME, "InfoDevice", eCmd, ucsDcsCmdInfoDevice, sParam, "3" & DEF_SEP, _
+                        "Index", lIndex, 4
+                    vSplit = Split(SendCommand(eCmd, sParam), DEF_SEP)
+                    dLastDate = ParseExtendedDate(At(vSplit, lIndex))
+                Else
+                    dLastDate = .InitRevData(ucsRevReceiptDate)
+                End If
+                vSplit = PpdGetTotalsByPaymentTypes(uRow, lRowCount)
+                dblTotal = C_Dbl(At(vSplit, 0)) - IIf(.InitRevData(ucsRevReceiptDate) > dLastDate, C_Dbl(At(vSplit, ucsFscPmtCash)), 0)
+                If Abs(dblTotal) > DBL_EPSILON Then
+                    PrintServiceDeposit dblTotal
+                    If LenB(m_uPrintData.LastError) <> 0 Then
+                        GoTo QH
+                    End If
+                End If
+            End If
+            '--- setup invoice no
             If LenB(.InitInvData(ucsInvDocNo)) <> 0 Then
                 Select Case .InitReceiptType
                 Case ucsFscRcpInvoice, ucsFscRcpCreditNote
@@ -1783,6 +1807,7 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
                     pvSettings(sParam) = .InitInvData(ucsInvDocNo)
                 End Select
             End If
+            '--- setup fiscal receipt
             Select Case .InitReceiptType
             Case ucsFscRcpReversal, ucsFscRcpCreditNote
                 '--- %1={OpCode}<SEP>%2={OpPwd}<SEP>{TillNmb}<SEP>%3={Storno}<SEP>%4={DocNum}<SEP>%5={DateTime}<SEP>%6={FMNumber}
@@ -1806,6 +1831,7 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
             If LenB(m_uPrintData.LastError) <> 0 Then
                 GoTo QH
             End If
+            '--- assert invoice number generated
             Select Case .InitReceiptType
             Case ucsFscRcpInvoice, ucsFscRcpCreditNote
                 uCtx.InvoiceNo = GetLastInvoiceNo()
@@ -1906,14 +1932,23 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
                     GoTo QH
                 End If
             End Select
-            If .DiscType = ucsFscDscSubtotal Then
+            Select Case .DiscType
+            Case ucsFscDscSubtotal
                 For lIdx = 1 To UBound(uCtx.GrpTotal)
                     If Abs(uCtx.GrpTotal(lIdx)) > DBL_EPSILON Then
                         dblTotal = Round(uCtx.GrpTotal(lIdx) * .DiscValue / 100#, DEF_PRICE_SCALE)
                         uCtx.GrpTotal(lIdx) = Round(uCtx.GrpTotal(lIdx) + dblTotal, DEF_PRICE_SCALE)
                     End If
                 Next
-            End If
+            Case ucsFscDscSubtotalAbs
+                '--- ToDo: fix for multiple tax groups
+                For lIdx = 1 To UBound(uCtx.GrpTotal)
+                    If Abs(uCtx.GrpTotal(lIdx)) > DBL_EPSILON Then
+                        uCtx.GrpTotal(lIdx) = Round(uCtx.GrpTotal(lIdx) + .DiscValue, DEF_PRICE_SCALE)
+                        Exit For
+                    End If
+                Next
+            End Select
         Case ucsRowLine
             If .LineWordWrap Then
                 vSplit = WrapText(.LineText, pvCommentChars)
@@ -1952,82 +1987,86 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
                 GoTo QH
             End If
         Case ucsRowPayment
+            pvGetCommandConfig CONF_NAME, "InfoTransaction", eCmd, ucsDcsCmdInfoTransaction, sParam, vbNullString, _
+                "Index", lIndex, 1, _
+                "StatusClosed", lStatusClosed, 0, _
+                "AmountIndex", lAmountIndex, 4, _
+                "PaidIndex", lPaidIndex, 5
+            vSplit = Split(SendCommand(eCmd, sParam), DEF_SEP)
+            If C_Lng(At(vSplit, lIndex)) = lStatusClosed Then
+                pvSetLastError pvInternal(ucsErrCannotPrint)
+                GoTo QH
+            End If
             If .PmtType <> 0 Then
-                '--- %1={PaidMode}<SEP>%2={Amount}<SEP>{Type}<SEP>
-                sParam = "%1" & DEF_SEP & "%2" & DEF_SEP & DEF_SEP
-                pvGetCommandConfig CONF_NAME, "FiscalPayment" & .PmtType, eCmd, ucsDcsCmdFiscalPayment, sParam, sParam, _
-                    "FormatAmount", sFormatAmount, FORMAT_BASE_2, _
-                    "FormatZero", sFormatZero, "\"
-                lIndex = pvToDevicePmtIndex(.PmtType)
-                If lIndex < 0 Then
-                    pvSetLastError Printf(pvInternal(ucsErrUnsupportedPaymentType), .PmtType)
+                If Abs(.PmtAmount) < DBL_EPSILON Then
+                    eCmd = ucsDcsCmdNoop
+                ElseIf uRow(0).InitReceiptType = ucsFscRcpReversal Or uRow(0).InitReceiptType = ucsFscRcpCreditNote Then
+                    eCmd = ucsDcsCmdNoop
+                Else
+                    '--- %1={PaidMode}<SEP>%2={Amount}<SEP>{Type}<SEP>
+                    sParam = "%1" & DEF_SEP & "%2" & DEF_SEP & DEF_SEP
+                    pvGetCommandConfig CONF_NAME, "FiscalPayment" & .PmtType, eCmd, ucsDcsCmdFiscalPayment, sParam, sParam, _
+                        "FormatAmount", sFormatAmount, FORMAT_BASE_2, _
+                        "FormatZero", sFormatZero, "\"
+                    lIndex = pvToDevicePmtIndex(.PmtType)
+                    If lIndex < 0 Then
+                        pvSetLastError Printf(pvInternal(ucsErrUnsupportedPaymentType), .PmtType)
+                        GoTo QH
+                    End If
+                    sParam = Printf(sParam, lIndex, SafeFormat(.PmtAmount, IIf(Abs(.PmtAmount) < DBL_EPSILON, sFormatZero, sFormatAmount)))
                 End If
-                sParam = Printf(sParam, lIndex, SafeFormat(.PmtAmount, IIf(Abs(.PmtAmount) < DBL_EPSILON, sFormatZero, sFormatAmount)))
-                SendCommand eCmd, sParam
-                If LenB(m_uPrintData.LastError) <> 0 Then
-                    GoTo QH
-                End If
-                uCtx.PmtPrinted = True
             Else
                 '--- check if anything left for payment
-                pvGetCommandConfig CONF_NAME, "InfoTransaction", eCmd, ucsDcsCmdInfoTransaction, sParam, vbNullString, _
-                    "Index", lIndex, 1, _
-                    "StatusClosed", lStatusClosed, 0, _
-                    "AmountIndex", lAmountIndex, 4, _
-                    "PaidIndex", lPaidIndex, 5
-                vSplit = Split(SendCommand(eCmd, sParam), DEF_SEP)
-                If C_Lng(At(vSplit, lIndex)) <> lStatusClosed Then
-                    If C_Dbl(At(vSplit, lAmountIndex)) > C_Dbl(At(vSplit, lPaidIndex)) _
-                            Or LenB(At(vSplit, lAmountIndex)) = 0 _
-                            Or Not uCtx.PmtPrinted Then
-                        sParam = DEF_SEP & DEF_SEP & DEF_SEP
-                        pvGetCommandConfig CONF_NAME, "FiscalPayment", eCmd, ucsDcsCmdFiscalPayment, sParam, sParam
-                        sParam = Printf(sParam, pvToDevicePmtIndex(ucsFscPmtCash))
-                        SendCommand eCmd, sParam
-                        If LenB(m_uPrintData.LastError) = 0 Then
-                            uCtx.PmtPrinted = True
-                        End If
+                If C_Dbl(At(vSplit, lAmountIndex)) > C_Dbl(At(vSplit, lPaidIndex)) _
+                        Or LenB(At(vSplit, lAmountIndex)) = 0 _
+                        Or Not uCtx.PmtPrinted Then
+                    sParam = DEF_SEP & DEF_SEP & DEF_SEP
+                    pvGetCommandConfig CONF_NAME, "FiscalPayment", eCmd, ucsDcsCmdFiscalPayment, sParam, sParam
+                    sParam = Printf(sParam, pvToDevicePmtIndex(ucsFscPmtCash))
+                    SendCommand eCmd, sParam
+                    If LenB(m_uPrintData.LastError) = 0 Then
+                        uCtx.PmtPrinted = True
                     End If
-                    Select Case .PrintRowType
-                    Case ucsFscRcpInvoice, ucsFscRcpCreditNote
-                        '--- %1={Seller}<SEP>%2={Receiver}<SEP>%3={Buyer}<SEP>%4={Address1}<SEP>%5={Address2}<SEP>%6={TypeTAXN}<SEP>%7={TAXN}<SEP>%8={VATN}<SEP>
-                        sParam = "%1" & DEF_SEP & "%2" & DEF_SEP & "%3" & DEF_SEP & "%4" & DEF_SEP & "%5" & DEF_SEP & "%6" & DEF_SEP & "%7" & DEF_SEP & "%8" & DEF_SEP
-                        pvGetCommandConfig CONF_NAME, "FiscalCgInfo", eCmd, ucsDcsCmdFiscalCgInfo, sParam, sParam
-                        With uRow(0)
-                            sParam = Printf(sParam, Left$(.InitOperatorName, m_uConfig.MaxCgInfo(ucsMciOperatorName)), _
-                                Left$(.InitInvData(ucsInvCgPrsReceive), m_uConfig.MaxCgInfo(ucsMciCgPrsReceive)), _
-                                Left$(.InitInvData(ucsInvCgName), m_uConfig.MaxCgInfo(ucsMciCgName)), _
-                                Left$(.InitInvData(ucsInvCgCity), m_uConfig.MaxCgInfo(ucsMciCgCity)), _
-                                Left$(.InitInvData(ucsInvCgAddress), m_uConfig.MaxCgInfo(ucsMciCgAddress)), _
-                                .InitInvData(ucsInvCgTaxNoType), _
-                                Left$(.InitInvData(ucsInvCgTaxNo), m_uConfig.MaxCgInfo(ucsMciCgTaxNo)), _
-                                Left$(.InitInvData(ucsInvCgVatNo), m_uConfig.MaxCgInfo(ucsMciCgVatNo)))
-                        End With
-                        SendCommand eCmd, sParam
-                        If LenB(m_uPrintData.LastError) <> 0 Then
-                            GoTo QH
-                        End If
-                    End Select
-                    uCtx.ReceiptNo = GetLastReceiptNo()
-                    uCtx.ReceiptDate = GetClock()
-                    uCtx.ReceiptAmount = C_Dbl(At(vSplit, lAmountIndex))
-                    '--- reversal type: 2 - operator error, 3 - refund, 4 - tax base reduction
-                    If C_Lng(At(vSplit, lIndex)) >= 2 And C_Lng(At(vSplit, lIndex)) <= 4 Then
-                        uCtx.ReceiptAmount = -uCtx.ReceiptAmount
-                    End If
-                    If uCtx.PmtPrinted Or SumArray(uCtx.GrpTotal) > DBL_EPSILON Then
-                        pvGetCommandConfig CONF_NAME, "FiscalClose" & .PrintRowType, eCmd, ucsDcsCmdFiscalClose, sParam, vbNullString
-                    Else
-                        pvGetCommandConfig CONF_NAME, "FiscalCancel" & .PrintRowType, eCmd, ucsIslCmdFiscalCancel, sParam, vbNullString
-                    End If
+                End If
+                Select Case .PrintRowType
+                Case ucsFscRcpInvoice, ucsFscRcpCreditNote
+                    '--- %1={Seller}<SEP>%2={Receiver}<SEP>%3={Buyer}<SEP>%4={Address1}<SEP>%5={Address2}<SEP>%6={TypeTAXN}<SEP>%7={TAXN}<SEP>%8={VATN}<SEP>
+                    sParam = "%1" & DEF_SEP & "%2" & DEF_SEP & "%3" & DEF_SEP & "%4" & DEF_SEP & "%5" & DEF_SEP & "%6" & DEF_SEP & "%7" & DEF_SEP & "%8" & DEF_SEP
+                    pvGetCommandConfig CONF_NAME, "FiscalCgInfo", eCmd, ucsDcsCmdFiscalCgInfo, sParam, sParam
+                    With uRow(0)
+                        sParam = Printf(sParam, Left$(.InitOperatorName, m_uConfig.MaxCgInfo(ucsMciOperatorName)), _
+                            Left$(.InitInvData(ucsInvCgPrsReceive), m_uConfig.MaxCgInfo(ucsMciCgPrsReceive)), _
+                            Left$(.InitInvData(ucsInvCgName), m_uConfig.MaxCgInfo(ucsMciCgName)), _
+                            Left$(.InitInvData(ucsInvCgCity), m_uConfig.MaxCgInfo(ucsMciCgCity)), _
+                            Left$(.InitInvData(ucsInvCgAddress), m_uConfig.MaxCgInfo(ucsMciCgAddress)), _
+                            .InitInvData(ucsInvCgTaxNoType), _
+                            Left$(.InitInvData(ucsInvCgTaxNo), m_uConfig.MaxCgInfo(ucsMciCgTaxNo)), _
+                            Left$(.InitInvData(ucsInvCgVatNo), m_uConfig.MaxCgInfo(ucsMciCgVatNo)))
+                    End With
                     SendCommand eCmd, sParam
                     If LenB(m_uPrintData.LastError) <> 0 Then
                         GoTo QH
                     End If
-                Else
-                    pvSetLastError pvInternal(ucsErrCannotPrint)
-                    GoTo QH
+                End Select
+                uCtx.ReceiptNo = GetLastReceiptNo()
+                uCtx.ReceiptDate = GetClock()
+                uCtx.ReceiptAmount = C_Dbl(At(vSplit, lAmountIndex))
+                '--- reversal type: 2 - operator error, 3 - refund, 4 - tax base reduction
+                If C_Lng(At(vSplit, lIndex)) >= 2 And C_Lng(At(vSplit, lIndex)) <= 4 Then
+                    uCtx.ReceiptAmount = -uCtx.ReceiptAmount
                 End If
+                If uCtx.PmtPrinted Or SumArray(uCtx.GrpTotal) > DBL_EPSILON Then
+                    pvGetCommandConfig CONF_NAME, "FiscalClose" & .PrintRowType, eCmd, ucsDcsCmdFiscalClose, sParam, vbNullString
+                Else
+                    pvGetCommandConfig CONF_NAME, "FiscalCancel" & .PrintRowType, eCmd, ucsIslCmdFiscalCancel, sParam, vbNullString
+                End If
+            End If
+            SendCommand eCmd, sParam
+            If LenB(m_uPrintData.LastError) <> 0 Then
+                GoTo QH
+            End If
+            If eCmd <> ucsDcsCmdNoop Then
+                uCtx.PmtPrinted = True
             End If
         End Select
         End With
