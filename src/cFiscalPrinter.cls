@@ -83,6 +83,7 @@ Private Const STR_TREMOL_ERRORS         As String = "Неизвестна грешка|Няма харт
 Private Const STR_TREMOL_TEXTS          As String = "В брой|С карта|По банка|Надбавка%1|Отстъпка%1|Междинна сума|Продажби %1|ЕИК;ЕГН;ЛНЧ;Служебен No"
 Private Const STR_ESP_POS_INTERNAL      As String = "Няма започната бележка|Грешка на ред %1: %2|Неподдържан вид отстъпка %1"
 Private Const STR_ESP_POS_TEXTS         As String = "В БРОЙ|С ЧЕК|ТАЛОНИ|В.ТАЛОНИ|АМБАЛАЖ|В.ОБСЛУЖВАНЕ|ПОВРЕДИ|С КАРТА|ПО БАНКA|НЗОК|ПРОГ.ТИП 2|ЕВРО|НАДБАВКА %1|ОТСТЪПКА %1|СУМА|МЕЖДИННА СУМА|ФАКТУРА No %1|Продажби %1|ЕДИНИЧНА ЦЕНА|КОЛИЧЕСТВО|СУМА|ВСИЧКО ГРУПА %1|ДДС %1=%2|НЕТО СТОЙНОСТ|ОБЩО|%1 АРТИКУЛА|1 АРТИКУЛ|РЕСТО|ПРОДАВАЧ: |ПОЛУЧАТЕЛ: |КУПУВАЧ: |ИДЕНТ. No: |ЗДДС No: |СИСТЕМЕН БОН|ПОРЪЧКА КЪМ КУХНЯ|Дата:     %1|Оператор: %1|Маса:     %1|ЕИК №: %1"
+Private Const STR_PROXY_INTERNAL        As String = "Устройството не е намерено|Невалидно състояние на готовност %1|Невалидeн JSON: %1|Неподдържан вид отстъпка %1"
 Private Const STR_CONNECTOR_ERRORS      As String = "Не е указано устройство|Грешка при отваряне: %1|Грешка при SetCommTimeouts: %1|Грешка при BuildCommDCB: %1|Грешка при SetCommState: %1|Грешка при WriteFile: %1|Време за достъп изтече в очакване на отговор|Грешка при ReadFile: %1|Грешка при WaitCommEvent: %1"
 Private Const ERR_UNKNOWN_PROTOCOL      As String = "Неизвестен протокол: %1"
 '--- enums texts
@@ -228,6 +229,7 @@ Public Function EnumPorts(sResponse As String) As Boolean
             JsonItem(oItem, "Firmware") = Zn(Trim$(At(vElem, 4)), Empty)
             JsonItem(oItem, "DeviceSerialNo") = Zn(Trim$(At(vElem, 5)), Empty)
             JsonItem(oItem, "FiscalMemoryNo") = Zn(Trim$(At(vElem, 6)), Empty)
+            JsonItem(oItem, "ModelGroup") = Zn(Trim$(At(vElem, 7)), Empty)
         Else
             JsonItem(oItem, "Port") = Zn(Trim$(C_Str(vElem)), Empty)
         End If
@@ -309,6 +311,7 @@ Public Function PrintReceipt(sRequest As String, sResponse As String) As Boolean
     If Not pvCommonProlog(sRequest, oJson, sLastErr, oFP, oRetVal) Then
         GoTo QH
     End If
+    pvCommonIncludesMiddleware oFP, oJson, oRetVal
     sResumeToken = JsonItem(oJson, "ResumeToken")
     If LenB(sResumeToken) = 0 Then
         If Not oFP.CancelReceipt() Then
@@ -421,7 +424,6 @@ ReturnReceiptInfo:
         End If
     End Select
     JsonItem(oRetVal, "LastInvoiceNo") = Zn(StripZeros(sInvoiceNo), Empty)
-    pvCommonIncludesMiddleware oFP, oJson, oRetVal
 QH:
     If LenB(sLastErr) <> 0 And Not oFP Is Nothing Then
         JsonItem(oRetVal, "ResumeToken") = Zn(oFP.GetResumeToken(), Empty)
@@ -456,6 +458,7 @@ Public Function PrintReport(sRequest As String, sResponse As String) As Boolean
     If Not pvCommonProlog(sRequest, oJson, sLastErr, oFP, oRetVal) Then
         GoTo QH
     End If
+    pvCommonIncludesMiddleware oFP, oJson, oRetVal
     ePrintType = JsonEnumValue(JsonItem(oJson, "ReportType"), STR_ENUM_REPORT_TYPE)
     Select Case ePrintType
     Case ucsFscRptDaily
@@ -505,7 +508,6 @@ Public Function PrintReport(sRequest As String, sResponse As String) As Boolean
     JsonItem(oRetVal, "ReceiptDateTime") = dReceiptDate
     JsonItem(oRetVal, "DeviceSerialNo") = Trim$(oFP.GetDeviceSerialNo())
     JsonItem(oRetVal, "FiscalMemoryNo") = Trim$(oFP.GetFiscalMemoryNo())
-    pvCommonIncludesMiddleware oFP, oJson, oRetVal
 QH:
     PrintReport = pvCommonEpilog(oFP, sLastErr, eLastNo, oRetVal, sResponse)
     Exit Function
@@ -531,12 +533,12 @@ Public Function OpenDrawer(sRequest As String, sResponse As String) As Boolean
     If Not pvCommonProlog(sRequest, oJson, sLastErr, oFP, oRetVal) Then
         GoTo QH
     End If
+    pvCommonIncludesMiddleware oFP, oJson, oRetVal
     If Not oFP.OpenDrawer() Then
         sLastErr = Zn(oFP.GetLastError(eLastNo), pvInternal(ucsErrNotImplemented))
         DebugLog FUNC_NAME, "Not oFP.OpenDrawer(), sLastErr=" & sLastErr & ", eLastNo=" & eLastNo
         GoTo QH
     End If
-    pvCommonIncludesMiddleware oFP, oJson, oRetVal
 QH:
     OpenDrawer = pvCommonEpilog(oFP, sLastErr, eLastNo, oRetVal, sResponse)
     Exit Function
@@ -566,6 +568,7 @@ Public Function InitDateTime(sRequest As String, sResponse As String) As Boolean
     If Not pvCommonProlog(sRequest, oJson, sLastErr, oFP, oRetVal) Then
         GoTo QH
     End If
+    pvCommonIncludesMiddleware oFP, oJson, oRetVal
     dDateTime = C_Date(JsonItem(oJson, "DeviceDateTime"))
     lTolerance = C_Lng(JsonItem(oJson, "AdjustTolerance"))
     dCurrent = oFP.GetClock()
@@ -595,7 +598,6 @@ SkipSetClock:
         JsonItem(oRetVal, "DeviceStatus") = sStatus
     End If
     JsonItem(oRetVal, "DeviceDateTime") = dCurrent
-    pvCommonIncludesMiddleware oFP, oJson, oRetVal
 QH:
     InitDateTime = pvCommonEpilog(oFP, sLastErr, eLastNo, oRetVal, sResponse)
     Exit Function
@@ -628,6 +630,7 @@ Public Function GetDailyTotals(sRequest As String, sResponse As String) As Boole
     If Not pvCommonProlog(sRequest, oJson, sLastErr, oFP, oRetVal) Then
         GoTo QH
     End If
+    pvCommonIncludesMiddleware oFP, oJson, oRetVal
     bIncludeAll = JsonBoolItem(oJson, "IncludeAllTotals")
     If JsonBoolItem(oJson, "IncludeStats") Or bIncludeAll Then
         vTotals = oFP.GetTotalsStats()
@@ -690,7 +693,6 @@ Public Function GetDailyTotals(sRequest As String, sResponse As String) As Boole
             Next
         End If
     End If
-    pvCommonIncludesMiddleware oFP, oJson, oRetVal
 QH:
     GetDailyTotals = pvCommonEpilog(oFP, sLastErr, eLastNo, oRetVal, sResponse)
     Exit Function
@@ -720,6 +722,7 @@ Public Function PrintServiceDeposit(sRequest As String, sResponse As String) As 
     If Not pvCommonProlog(sRequest, oJson, sLastErr, oFP, oRetVal) Then
         GoTo QH
     End If
+    pvCommonIncludesMiddleware oFP, oJson, oRetVal
     vTotals = oFP.PrintServiceDeposit(C_Str(JsonItem(oJson, "Operator/Code")), C_Str(JsonItem(oJson, "Operator/Password")), _
         C_Dbl(JsonItem(oJson, "Amount")), sReceiptNo, dReceiptDate, dblReceiptAmount)
     If Not IsArray(vTotals) Then
@@ -747,7 +750,6 @@ Public Function PrintServiceDeposit(sRequest As String, sResponse As String) As 
     JsonItem(oRetVal, "TotalAvailable") = vTotals(0)
     JsonItem(oRetVal, "TotalDeposits") = vTotals(1)
     JsonItem(oRetVal, "TotalWithdraws") = vTotals(2)
-    pvCommonIncludesMiddleware oFP, oJson, oRetVal
 QH:
     PrintServiceDeposit = pvCommonEpilog(oFP, sLastErr, eLastNo, oRetVal, sResponse)
     Exit Function
@@ -775,10 +777,10 @@ Public Function GetDeviceStatus(sRequest As String, sResponse As String) As Bool
     If Not pvCommonProlog(sRequest, oJson, sLastErr, oFP, oRetVal) Then
         GoTo QH
     End If
+    pvCommonIncludesMiddleware oFP, oJson, oRetVal
     eStatusCode = oFP.GetDeviceStatus(sStatusText)
     JsonItem(oRetVal, "DeviceStatusCode") = At(Split(STR_ENUM_STATUS_CODE, "|"), eStatusCode, "unknown " & eStatusCode)
     JsonItem(oRetVal, "DeviceStatus") = Zn(sStatusText, Empty)
-    pvCommonIncludesMiddleware oFP, oJson, oRetVal
 QH:
     GetDeviceStatus = pvCommonEpilog(oFP, sLastErr, eLastNo, oRetVal, sResponse)
     Exit Function
@@ -856,6 +858,7 @@ Private Function pvInit(DeviceString As String, Optional ByVal SkipInit As Boole
         pvInit.SetLocalizedText ucsFscLciConnectorErrors, GetConfigValue(sProtocol, CFG_CONNECTOR_ERRORS, STR_CONNECTOR_ERRORS)
     Case STR_PROTOCOL_PROXY
         Set pvInit = New cProxyProtocol
+        pvInit.SetLocalizedText ucsFscLciInternalErrors, GetConfigValue(sProtocol, CFG_INTERNAL_ERRORS, STR_PROXY_INTERNAL)
     Case Else
         Err.Raise vbObjectError, , Printf(ERR_UNKNOWN_PROTOCOL, sProtocol)
     End Select

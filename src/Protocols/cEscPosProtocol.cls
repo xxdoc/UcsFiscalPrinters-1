@@ -73,6 +73,7 @@ Private Const DEF_ROW_CHARS             As Long = 48
 Private Const DEF_MIN_DISCOUNT          As Double = -100
 Private Const DEF_MAX_DISCOUNT          As Double = 100
 Private Const DEF_MAX_RECEIPT_ROWS      As Long = 1000
+Private Const DEF_MAX_ITEM_LINES        As Long = 2
 Private Const STR_GS                    As String = "" ' Chr$(29)
 Private Const STR_ESC                   As String = "" ' Chr$(27)
 
@@ -300,8 +301,8 @@ Public Function AutodetectDevices(vPorts As Variant) As Variant
                         For lJdx = 0 To UBound(baBuffer)
                             If (baBuffer(lJdx) And &H90) = 0 And baBuffer(lJdx) <> 0 Then
                                 DebugLog FUNC_NAME, "Auto-detecting " & .Connector.Device & " reply 0x" & ToHexDump(StrConv(baBuffer, vbUnicode))
-                                sModel = pvGetAutodetectInfo(.Connector, 67) & pvGetAutodetectInfo(.Connector, 66) & _
-                                         pvGetAutodetectInfo(.Connector, 68) & pvGetAutodetectInfo(.Connector, 65)
+                                sModel = pvRawGetAutodetectInfo(.Connector, 67) & pvRawGetAutodetectInfo(.Connector, 66) & _
+                                         pvRawGetAutodetectInfo(.Connector, 68) & pvRawGetAutodetectInfo(.Connector, 65)
                                 If Len(sModel) > 1 Then
                                     vRetVal(lIdx) = Array(At(vPorts, lIdx), vSpeed, STR_PROTOCOL_ESCPOS, Trim$(Mid$(sModel, 2)))
                                 End If
@@ -324,7 +325,7 @@ EH:
     RaiseError FUNC_NAME
 End Function
 
-Private Function pvGetAutodetectInfo(oConnector As IDeviceConnector, ByVal lIndex As Long) As String
+Private Function pvRawGetAutodetectInfo(oConnector As IDeviceConnector, ByVal lIndex As Long) As String
     Dim sCmd            As String
     Dim sRetVal         As String
     Dim baBuffer()      As Byte
@@ -348,7 +349,7 @@ Repeat:
         End If
     End If
     If LenB(sRetVal) <> 0 Then
-        pvGetAutodetectInfo = ", " & sRetVal
+        pvRawGetAutodetectInfo = ", " & sRetVal
     End If
 End Function
 
@@ -382,6 +383,7 @@ Public Function Init(sDeviceString As String) As Boolean
         .MinDiscount = Zndbl(C_Dbl(JsonItem(oOptions, "MinDiscount")), DEF_MIN_DISCOUNT)
         .MaxDiscount = Zndbl(C_Dbl(JsonItem(oOptions, "MaxDiscount")), DEF_MAX_DISCOUNT)
         .MaxReceiptRows = Znl(C_Lng(JsonItem(oOptions, "MaxReceiptRows")), DEF_MAX_RECEIPT_ROWS)
+        .MaxItemLines = Znl(C_Lng(JsonItem(oOptions, "MaxItemLines")), DEF_MAX_ITEM_LINES)
     End With
     '--- success
     Init = True
@@ -466,8 +468,8 @@ End Function
 Public Function GetDeviceModel() As String
     Dim sModel          As String
     
-    sModel = pvGetAutodetectInfo(m_oConnector, 67) & pvGetAutodetectInfo(m_oConnector, 66) & _
-             pvGetAutodetectInfo(m_oConnector, 68) & pvGetAutodetectInfo(m_oConnector, 65)
+    sModel = pvRawGetAutodetectInfo(m_oConnector, 67) & pvRawGetAutodetectInfo(m_oConnector, 66) & _
+             pvRawGetAutodetectInfo(m_oConnector, 68) & pvRawGetAutodetectInfo(m_oConnector, 65)
     GetDeviceModel = Trim$(Mid$(sModel, 2))
 End Function
 
@@ -662,6 +664,11 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
                 End If
                 If .PrintRowType = ucsFscRcpSale Then
                     vSplit = WrapMultiline(.PluItemName, pvItemChars)
+                    If m_uPrintData.Config.MaxItemLines > 0 Then
+                        If UBound(vSplit) >= m_uPrintData.Config.MaxItemLines Then
+                            ReDim Preserve vSplit(0 To m_uPrintData.Config.MaxItemLines - 1) As Variant
+                        End If
+                    End If
                     If Abs(.PluQuantity - 1) > DBL_EPSILON Then
                         If UBound(vSplit) = 0 Then
                             ReDim Preserve vSplit(0 To 1) As Variant
@@ -681,6 +688,11 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
                     pvPrintLine vSplit
                 Else
                     vSplit = WrapMultiline(.PluItemName, pvCommentChars - 2)
+                    If m_uPrintData.Config.MaxItemLines > 0 Then
+                        If UBound(vSplit) >= m_uPrintData.Config.MaxItemLines Then
+                            ReDim Preserve vSplit(0 To m_uPrintData.Config.MaxItemLines - 1) As Variant
+                        End If
+                    End If
                     For lIdx = 0 To UBound(vSplit)
                         pvPrintLine C_Str(vSplit(lIdx))
                     Next

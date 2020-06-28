@@ -36,7 +36,7 @@ Private Declare Function InitCommonControls Lib "comctl32" () As Long
 '=========================================================================
 
 Private Const STR_LATEST_COMMIT         As String = ""
-Public Const STR_VERSION                As String = "0.1.47" & STR_LATEST_COMMIT
+Public Const STR_VERSION                As String = "0.1.48" & STR_LATEST_COMMIT
 Public Const STR_SERVICE_NAME           As String = "UcsFPHub"
 Public Const DEF_LISTEN_PORT            As Long = 8192
 Private Const STR_APPID_GUID            As String = "{6E78E71A-35B2-4D23-A88C-4C2858430329}"
@@ -264,6 +264,9 @@ Public Function Process(vArgs As Variant, ByVal bStarted As Boolean) As Long
             Process = 1
             GoTo QH
         End If
+        If FileLen(sConfFile) = 0 Then
+            GoTo LoadDefaultConfig
+        End If
         If Not JsonParse(ReadTextFile(sConfFile), m_oConfig, Error:=sError) Then
             DebugLog MODULE_NAME, FUNC_NAME, Printf(ERR_PARSING_CONFIG, sConfFile, sError), vbLogEventTypeError
             Process = 1
@@ -271,6 +274,7 @@ Public Function Process(vArgs As Variant, ByVal bStarted As Boolean) As Long
         End If
         DebugLog MODULE_NAME, FUNC_NAME, Printf(STR_LOADING_CONFIG, sConfFile)
     Else
+LoadDefaultConfig:
         JsonItem(m_oConfig, "Printers/Autodetect") = True
         JsonItem(m_oConfig, "Endpoints/0/Binding") = "RestHttp"
         JsonItem(m_oConfig, "Endpoints/0/Address") = "127.0.0.1:" & DEF_LISTEN_PORT

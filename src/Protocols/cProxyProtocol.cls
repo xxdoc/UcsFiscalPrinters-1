@@ -30,21 +30,19 @@ Implements IDeviceProtocol
 ' Constant and member variables
 '=========================================================================
 
+Private Const STR_INTERNAL              As String = "Device not found|Invalid ready state %1|Invalid JSON: %1|Unsupported discount type %1"
 Private Const DEF_ROW_CHARS             As Long = 32
 Private Const DEF_ITEM_CHARS            As Long = 72
 Private Const DEF_MIN_DISCOUNT          As Double = -100
 Private Const DEF_MAX_DISCOUNT          As Double = 100
 Private Const DEF_MAX_RECEIPT_ROWS      As Long = 1000
+Private Const DEF_MAX_ITEM_LINES        As Long = 2
 Private Const DEF_HEADERS               As String = "Наименование на задълженото лице|Адрес на задълженото лице|Наименование на обект|Адрес на обект"
 Private Const DEF_FOOTERS               As String = "Заповядайте отново!"
 Private Const DEF_PMTNAMES              As String = "В брой|С чек|Талони|В.талони|Амбалаж|В.обслужване|Повреди|С карта|По банкa|НЗОК|Прог.тип 2"
 Private Const DEF_TAXCAPTION            As String = "ЕИК"
 Private Const DEF_TAXNO                 As String = "Незададен"
 Private Const DEF_TAXRATES              As String = "0|20|20|9"
-'--- errrors
-Private Const ERR_INVALID_READYSTATE    As String = "Невалидно състояние на готовност %1"
-Private Const ERR_INVALID_JSON          As String = "Невалидeн JSON: %1"
-Private Const ERR_DEVICE_NOT_FOUND      As String = "Устройството не е намерено"
 '--- numeric
 Private Const READYSTATE_COMPLETE       As Long = 4
 
@@ -56,6 +54,13 @@ Private m_dLastReceiptDate          As Date
 Private m_dblLastReceiptAmount      As Double
 Private m_sLastInvoiceNo            As String
 Private m_sResumeToken              As String
+
+Private Enum UcsInternalErrors
+    ucsErrDeviceNotFound
+    ucsErrInvalidReadyState
+    ucsErrInvalidJSON
+    ucsErrUnsupportedDiscType
+End Enum
 
 Private Type UcsConfigValues
     DefaultPassword     As String
@@ -147,7 +152,7 @@ End Property
 Public Function Init(sDeviceString As String) As Boolean
     Const FUNC_NAME     As String = "Init"
     Dim oOptions        As Object
-    Dim sSerial         As String
+    Dim sDeviceSerialNo As String
     Dim oResponse       As Object
     
     On Error GoTo EH
@@ -156,27 +161,28 @@ Public Function Init(sDeviceString As String) As Boolean
     If ParseUrl(C_Str(JsonItem(oOptions, "Url")), m_uRemote) Then
         pvSendRequest "GET", vbNullString, Nothing, oResponse
     End If
-    sSerial = Zn(C_Str(JsonItem(oResponse, "DeviceSerialNo")), C_Str(JsonItem(oOptions, "DeviceSerialNo")))
-    If LenB(sSerial) = 0 Then
-        m_uPrintData.LastError = ERR_DEVICE_NOT_FOUND
+    sDeviceSerialNo = Zn(C_Str(JsonItem(oResponse, "DeviceSerialNo")), C_Str(JsonItem(oOptions, "DeviceSerialNo")))
+    If LenB(sDeviceSerialNo) = 0 Then
+        pvSetLastError pvInternal(ucsErrDeviceNotFound)
         GoTo QH
     End If
     With m_uPrintData.Config
-        .RowChars = GetConfigNumber(sSerial, "RowChars", C_Lng(JsonItem(oOptions, "RowChars")))
-        .CommentChars = GetConfigNumber(sSerial, "CommentChars", C_Lng(JsonItem(oOptions, "CommentChars")))
-        .ItemChars = GetConfigNumber(sSerial, "ItemChars", C_Lng(JsonItem(oOptions, "ItemChars")))
-        .AbsoluteDiscount = C_Bool(GetConfigValue(sSerial, "AbsoluteDiscount", True))
-        .NegativePrices = C_Bool(GetConfigValue(sSerial, "NegativePrices", True))
-        .MinDiscount = GetConfigNumber(sSerial, "MinDiscount", Zndbl(C_Dbl(JsonItem(oOptions, "MinDiscount")), DEF_MIN_DISCOUNT))
-        .MaxDiscount = GetConfigNumber(sSerial, "MaxDiscount", Zndbl(C_Dbl(JsonItem(oOptions, "MaxDiscount")), DEF_MAX_DISCOUNT))
-        .MaxReceiptRows = GetConfigNumber(sSerial, "MaxReceiptRows", Znl(C_Lng(JsonItem(oOptions, "MaxReceiptRows")), DEF_MAX_RECEIPT_ROWS))
+        .RowChars = GetConfigNumber(sDeviceSerialNo, "RowChars", C_Lng(JsonItem(oOptions, "RowChars")))
+        .CommentChars = GetConfigNumber(sDeviceSerialNo, "CommentChars", C_Lng(JsonItem(oOptions, "CommentChars")))
+        .ItemChars = GetConfigNumber(sDeviceSerialNo, "ItemChars", C_Lng(JsonItem(oOptions, "ItemChars")))
+        .AbsoluteDiscount = C_Bool(GetConfigValue(sDeviceSerialNo, "AbsoluteDiscount", True))
+        .NegativePrices = C_Bool(GetConfigValue(sDeviceSerialNo, "NegativePrices", True))
+        .MinDiscount = GetConfigNumber(sDeviceSerialNo, "MinDiscount", Zndbl(C_Dbl(JsonItem(oOptions, "MinDiscount")), DEF_MIN_DISCOUNT))
+        .MaxDiscount = GetConfigNumber(sDeviceSerialNo, "MaxDiscount", Zndbl(C_Dbl(JsonItem(oOptions, "MaxDiscount")), DEF_MAX_DISCOUNT))
+        .MaxReceiptRows = GetConfigNumber(sDeviceSerialNo, "MaxReceiptRows", Znl(C_Lng(JsonItem(oOptions, "MaxReceiptRows")), DEF_MAX_RECEIPT_ROWS))
+        .MaxItemLines = GetConfigNumber(sDeviceSerialNo, "MaxItemLines", Znl(C_Lng(JsonItem(oOptions, "MaxItemLines")), DEF_MAX_ITEM_LINES))
         '--- from response
         .RowChars = Znl(C_Lng(JsonItem(oResponse, "CharsPerLine")), .RowChars)
         .CommentChars = Znl(C_Lng(JsonItem(oResponse, "CommentTextMaxLength")), .CommentChars)
         .ItemChars = Znl(C_Lng(JsonItem(oResponse, "ItemNameMaxLength")), .ItemChars)
     End With
     With m_uConfig
-        .DefaultPassword = GetConfigValue(sSerial, "DefaultPassword", JsonItem(oOptions, "DefaultPassword"))
+        .DefaultPassword = GetConfigValue(sDeviceSerialNo, "DefaultPassword", JsonItem(oOptions, "DefaultPassword"))
         .DeviceSerialNo = Zn(C_Str(JsonItem(oResponse, "DeviceSerialNo")), C_Str(JsonItem(oOptions, "DeviceSerialNo")))
         .FiscalMemoryNo = Zn(C_Str(JsonItem(oResponse, "FiscalMemoryNo")), C_Str(JsonItem(oOptions, "FiscalMemoryNo")))
         .DeviceModel = Zn(C_Str(JsonItem(oResponse, "DeviceModel")), "Proxy")
@@ -585,8 +591,18 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
             End Select
             JsonItem(oRequest, "UniqueSaleNo") = .InitUniqueSaleNo
         Case ucsRowPlu
-            JsonItem(oRequest, "Rows/-1") = Array(.PluItemName, .PluPrice, .PluTaxGroup, .PluQuantity)
+            JsonItem(oRequest, "Rows/-1") = Array(.PluItemName, .PluPrice, .PluTaxGroup, .PluQuantity, .DiscValue, .PluUnitOfMeasure, .PluDepartmentNo)
         Case ucsRowDiscount
+            Set oItem = Nothing
+            If .DiscType = ucsFscDscSubtotal Then
+                JsonItem(oItem, "DiscountPercent") = .DiscValue
+            ElseIf .DiscType = ucsFscDscSubtotalAbs Then
+                JsonItem(oItem, "DiscountAmount") = .DiscValue
+            Else
+                pvSetLastError Printf(pvInternal(ucsErrUnsupportedDiscType), .DiscType)
+                GoTo QH
+            End If
+            JsonItem(oRequest, "Rows/-1") = oItem
         Case ucsRowLine
             JsonItem(oRequest, "Rows/-1") = Array(.LineText)
         Case ucsRowBarcode
@@ -657,7 +673,7 @@ Private Function pvSendRequest( _
             .Send
         End If
         If .ReadyState <> READYSTATE_COMPLETE Then
-            Error = Printf(ERR_INVALID_READYSTATE, .ReadyState)
+            Error = Printf(pvInternal(ucsErrInvalidReadyState), .ReadyState)
             GoTo QH
         ElseIf .Status < 200 Or .Status > 299 Then
             Error = .Status & " " & .StatusText
@@ -666,7 +682,7 @@ Private Function pvSendRequest( _
         DebugDataDump FUNC_NAME, "[RECV ] ", .ResponseText
         If Not JsonParse(.ResponseText, vJson, Error:=Error) Then
             DebugLog FUNC_NAME, "Error parsing ResponseText=" & .ResponseText & ", Error=" & Error
-            Error = Printf(ERR_INVALID_JSON, Error)
+            Error = Printf(pvInternal(ucsErrInvalidJSON), Error)
             GoTo QH
         End If
     End With
@@ -680,13 +696,45 @@ Private Function pvSendRequest( _
     '--- success
     pvSendRequest = True
 QH:
-    m_uPrintData.LastError = Error
+    If LenB(Error) <> 0 Or LenB(JsonItem(oResponse, "ErrorCode")) <> 0 Then
+        pvSetLastError Error, JsonItem(oResponse, "ErrorCode")
+    End If
     DebugLog FUNC_NAME, "RetVal=" & pvSendRequest & ", Error=" & Error & ", Elapsed=" & Format$(TimerEx - dblTimerEx, "0.000")
     Exit Function
 EH:
     Error = Err.Description
     Resume QH
 End Function
+
+Private Function pvInternal(ByVal lIdx As UcsInternalErrors) As String
+    Const FUNC_NAME     As String = "pvInternal"
+    
+    On Error GoTo EH
+    pvInternal = At(m_uConfig.LocalizedText(ucsFscLciInternalErrors), lIdx)
+    If LenB(pvInternal) = 0 Then
+        pvInternal = At(Split(STR_INTERNAL, "|"), lIdx)
+    End If
+    Exit Function
+EH:
+    RaiseError FUNC_NAME
+End Function
+
+Private Sub pvSetLastError(sError As String, Optional ErrorCode As String)
+    Const FUNC_NAME     As String = "pvSetLastError"
+    
+    On Error GoTo EH
+    If LenB(ErrorCode) = 0 Then
+        m_uPrintData.LastErrNo = IIf(LenB(sError) = 0, ucsFerNone, ucsFerGeneralError)
+    ElseIf ErrorCode = "InvalidPassword" Then
+        m_uPrintData.LastErrNo = ucsFerInvalidPassword
+    ElseIf ErrorCode = "PasswordNotSet" Then
+        m_uPrintData.LastErrNo = ucsFerPasswordNotSet
+    End If
+    m_uPrintData.LastError = Zn(sError, ErrorCode)
+    Exit Sub
+EH:
+    RaiseError FUNC_NAME
+End Sub
 
 '=========================================================================
 ' IDeviceProtocol interface
