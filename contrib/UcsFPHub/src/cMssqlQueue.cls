@@ -60,6 +60,8 @@ Private m_oCallback                 As cQueueEndpoint
 Private m_sLastError                As String
 Private m_sSqlInstance              As String
 Private m_sSqlDatabase              As String
+Private m_lSqlProcessID             As Long
+Private m_sConvHandle               As String
 
 '=========================================================================
 ' Error handling
@@ -114,7 +116,6 @@ End Function
 
 Private Function pvQueueSetup() As Boolean
     Const FUNC_NAME     As String = "pvQueueSetup"
-    Dim lPos            As Long
     Dim lIdx            As Long
     Dim vElem           As Variant
     
@@ -122,8 +123,7 @@ Private Function pvQueueSetup() As Boolean
     '-- setup initiator queue
     m_oConn.usp_sys_ServiceBrokerSetupService
     '-- setup target queue
-    lPos = InStr(m_sQueueName, "/")
-    m_oConn.usp_sys_ServiceBrokerSetupService m_sQueueName, STR_SVC_PREFIX & Mid$(m_sQueueName, lPos), "DROP_EXISTING"
+    m_oConn.usp_sys_ServiceBrokerSetupService m_sQueueName, STR_SVC_PREFIX & "/" & m_lSqlProcessID, "DROP_EXISTING"
     lIdx = lIdx + 1
     For Each vElem In m_vPrinters
         If LenB(C_Str(vElem)) <> 0 Then
@@ -143,7 +143,7 @@ Private Function pvQueueLoopAsync() As Boolean
     Const FUNC_NAME     As String = "pvQueueLoopAsync"
     
     On Error GoTo EH
-    m_oRecvConn.Execute Printf(STR_QUEUE_LOOP, m_sQueueName, -1), , adAsyncExecute Or adAsyncFetch
+    m_oRecvConn.Execute Printf(STR_QUEUE_LOOP, m_sQueueName, -1), Options:=adCmdText Or adAsyncExecute Or adAsyncFetch
     '--- success
     pvQueueLoopAsync = True
     Exit Function
@@ -153,15 +153,13 @@ End Function
 
 Private Function pvQueueTerminate() As Boolean
     Const FUNC_NAME     As String = "pvQueueTerminate"
-    Dim lPos            As Long
     
     On Error GoTo EH
     If pvIsConnBusy(m_oRecvConn) Then
         m_oRecvConn.Cancel
     End If
     If pvIsConnAlive(m_oConn) Then
-        lPos = InStr(m_sQueueName, "/")
-        m_oConn.usp_sys_ServiceBrokerSetupService m_sQueueName, STR_SVC_PREFIX & Mid$(m_sQueueName, lPos), "DROP_ONLY"
+        m_oConn.usp_sys_ServiceBrokerSetupService m_sQueueName, STR_SVC_PREFIX & "/" & m_lSqlProcessID, "DROP_ONLY"
         DebugLog MODULE_NAME, FUNC_NAME, Printf(STR_QUEUE_TERMINATE, m_sQueueName)
     End If
     '--- success
@@ -173,9 +171,10 @@ End Function
 
 Private Function pvIsConnAlive(cn As ADODB.Connection) As Boolean
     On Error GoTo QH
-    With cn.Execute("SELECT @@SERVERNAME, DB_NAME()")
+    With cn.Execute("SELECT @@SERVERNAME, DB_NAME(), @@SPID", Options:=adCmdText)
         m_sSqlInstance = .Fields.Item(0).Value
         m_sSqlDatabase = .Fields.Item(1).Value
+        m_lSqlProcessID = .Fields.Item(2).Value
     End With
     '--- success
     pvIsConnAlive = True
@@ -189,12 +188,10 @@ QH:
 End Function
 
 Private Function pvIsQueueAlive(cn As ADODB.Connection) As Boolean
-    Dim lPos            As Long
     Dim sHandle         As String
     
     On Error GoTo QH
-    lPos = InStr(m_sQueueName, "/")
-    With pvPrepareServiceBrokerSendCommand(cn, Request:="__PING__", TargetSvc:=STR_SVC_PREFIX & Mid$(m_sQueueName, lPos))
+    With pvPrepareServiceBrokerSendCommand(cn, Request:="__PING__", TargetSvc:=STR_SVC_PREFIX & "/" & m_lSqlProcessID)
         .Execute
         If .Parameters("RetVal").Value <> 0 Then
             GoTo QH
@@ -211,6 +208,23 @@ Private Function pvIsQueueAlive(cn As ADODB.Connection) As Boolean
     '--- success
     pvIsQueueAlive = True
 QH:
+End Function
+
+Private Function pvIsConversationAlive() As Boolean
+    Const FUNC_NAME     As String = "pvIsConversationAlive"
+    
+    On Error GoTo EH
+    If LenB(m_sConvHandle) <> 0 Then
+        If IsLogDebugEnabled Then
+            DebugLog MODULE_NAME, FUNC_NAME, "m_sConvHandle=" & m_sConvHandle
+        End If
+        m_oConn.Execute Printf(STR_SEND_ON_CONV, Quote(m_sConvHandle), "__PONG__"), Options:=adCmdText Or adExecuteNoRecords
+        '--- success
+        pvIsConversationAlive = True
+    End If
+    Exit Function
+EH:
+    PrintError FUNC_NAME
 End Function
 
 Private Function pvPrepareServiceBrokerSendCommand( _
@@ -316,13 +330,14 @@ Private Sub m_oRecvConn_ExecuteComplete(ByVal RecordsAffected As Long, ByVal pEr
                 pvQueueLoopAsync
                 Set m_pTimeoutTimer = Nothing
                 sHandle = C_Str(pRecordset!Handle.Value)
+                m_sConvHandle = sHandle
                 If C_Lng(pRecordset!Result.Value) = 0 And LenB(sHandle) <> 0 Then
                     If m_oCallback.frHandleRequest(C_Str(pRecordset!SvcName.Value), C_Str(pRecordset!Request.Value), sResponse, lErrorCode) Then
-                        m_oConn.Execute Printf(STR_SEND_ON_CONV, Quote(sHandle), Quote(sResponse))
+                        m_oConn.Execute Printf(STR_SEND_ON_CONV, Quote(sHandle), Quote(sResponse)), Options:=adCmdText Or adExecuteNoRecords
                     Else
                         lErrorCode = Znl(lErrorCode, 500)
                         m_oConn.Execute Printf(STR_END_CONV_WITH_ERROR, Quote(sHandle), lErrorCode, _
-                            Quote(Zn(sResponse, Printf(ERR_UNKNOWN, lErrorCode))))
+                            Quote(Zn(sResponse, Printf(ERR_UNKNOWN, lErrorCode)))), Options:=adCmdText Or adExecuteNoRecords
                     End If
                 ElseIf C_Lng(pRecordset!Result.Value) <> 99 Then
                     sResponse = C_Str(pRecordset!ErrorText.Value)
@@ -330,12 +345,16 @@ Private Sub m_oRecvConn_ExecuteComplete(ByVal RecordsAffected As Long, ByVal pEr
                         sPrinterID = At(Split(C_Str(pRecordset!SvcName.Value), "/"), 1)
                         DebugLog MODULE_NAME, FUNC_NAME, Printf(STR_QUEUE_ERROR, m_sQueueName, sPrinterID, sResponse), vbLogEventTypeError
                     End If
+                    If C_Lng(pRecordset!Result.Value) = 2 Then
+                        pvQueueSetup
+                    End If
                 End If
                 pvRestartTimer
             End If
         End If
     End If
 QH:
+    m_sConvHandle = vbNullString
     bHere = False
     Exit Sub
 EH:
@@ -357,9 +376,11 @@ NextLine:
         If LenB(sHandle) <> 0 Then
             lErrorCode = Znl(lErrorCode, 500)
             m_oConn.Execute Printf(STR_END_CONV_WITH_ERROR, Quote(sHandle), lErrorCode, _
-                Quote(Zn(m_sLastError, Printf(ERR_UNKNOWN, lErrorCode))))
+                Quote(Zn(m_sLastError, Printf(ERR_UNKNOWN, lErrorCode)))), Options:=adCmdText Or adExecuteNoRecords
         End If
-        pvQueueLoopAsync
+        If vErr(0) <> adErrOperationCancelled Then
+            pvQueueLoopAsync
+        End If
     Else
         Set m_oConn = Nothing
         Set m_oRecvConn = Nothing
@@ -371,9 +392,11 @@ NextLine:
             If LenB(sHandle) <> 0 Then
                 lErrorCode = Znl(lErrorCode, 500)
                 m_oConn.Execute Printf(STR_END_CONV_WITH_ERROR, Quote(sHandle), lErrorCode, _
-                    Quote(Zn(m_sLastError, Printf(ERR_UNKNOWN, lErrorCode))))
+                    Quote(Zn(m_sLastError, Printf(ERR_UNKNOWN, lErrorCode)))), Options:=adCmdText Or adExecuteNoRecords
             End If
-            pvQueueLoopAsync
+            If vErr(0) <> adErrOperationCancelled Then
+                pvQueueLoopAsync
+            End If
         End If
     End If
     If m_pTimeoutTimer Is Nothing Then
@@ -398,3 +421,8 @@ End Function
 Private Function IQueue_Terminate() As Boolean
     IQueue_Terminate = pvQueueTerminate
 End Function
+
+Private Function IQueue_IsConversationAlive() As Boolean
+    IQueue_IsConversationAlive = pvIsConversationAlive
+End Function
+

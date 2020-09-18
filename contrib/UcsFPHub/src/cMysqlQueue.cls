@@ -67,6 +67,7 @@ Private m_oCallback                 As cQueueEndpoint
 Private m_sLastError                As String
 Private m_sSqlInstance              As String
 Private m_sSqlDatabase              As String
+Private m_lSqlProcessID             As Long
 Private m_pRecordset                As Recordset
 
 '=========================================================================
@@ -122,13 +123,11 @@ End Function
 
 Private Function pvQueueSetup() As Boolean
     Const FUNC_NAME     As String = "pvQueueSetup"
-    Dim lPos            As Long
     Dim lIdx            As Long
     Dim vElem           As Variant
     
     On Error GoTo EH
-    lPos = InStr(m_sQueueName, "/")
-    m_oConn.usp_umq_setup_service m_sQueueName, STR_SVC_PREFIX & Mid$(m_sQueueName, lPos), "DROP_EXISTING"
+    m_oConn.usp_umq_setup_service m_sQueueName, STR_SVC_PREFIX & "/" & m_lSqlProcessID, "DROP_EXISTING"
     lIdx = lIdx + 1
     For Each vElem In m_vPrinters
         If LenB(C_Str(vElem)) <> 0 Then
@@ -148,7 +147,7 @@ Private Function pvQueueLoopAsync() As Boolean
     Const FUNC_NAME     As String = "pvQueueLoopAsync"
     
     On Error GoTo EH
-    m_oRecvConn.Execute Printf(STR_QUEUE_LOOP, m_sQueueName, m_lQueueTimeout), , adAsyncExecute Or adAsyncFetch
+    m_oRecvConn.Execute Printf(STR_QUEUE_LOOP, m_sQueueName, m_lQueueTimeout), Options:=adCmdText Or adAsyncExecute Or adAsyncFetch
     '--- success
     pvQueueLoopAsync = True
     Exit Function
@@ -158,15 +157,13 @@ End Function
 
 Private Function pvQueueTerminate() As Boolean
     Const FUNC_NAME     As String = "pvQueueTerminate"
-    Dim lPos            As Long
     
     On Error GoTo EH
     If pvIsConnBusy(m_oRecvConn) Then
         m_oRecvConn.Cancel
     End If
     If pvIsConnAlive(m_oConn) Then
-        lPos = InStr(m_sQueueName, "/")
-        m_oConn.usp_umq_setup_service m_sQueueName, STR_SVC_PREFIX & Mid$(m_sQueueName, lPos), "DROP_ONLY"
+        m_oConn.usp_umq_setup_service m_sQueueName, STR_SVC_PREFIX & "/" & m_lSqlProcessID, "DROP_ONLY"
         DebugLog MODULE_NAME, FUNC_NAME, Printf(STR_QUEUE_TERMINATE, m_sQueueName)
     End If
     '--- success
@@ -178,9 +175,10 @@ End Function
 
 Public Function pvIsConnAlive(cn As ADODB.Connection) As Boolean
     On Error GoTo QH
-    With cn.Execute("SELECT @@HOSTNAME, DATABASE();")
+    With cn.Execute("SELECT @@HOSTNAME, DATABASE(), CONNECTION_ID();", Options:=adCmdText)
         m_sSqlInstance = .Fields.Item(0).Value
         m_sSqlDatabase = .Fields.Item(1).Value
+        m_lSqlProcessID = .Fields.Item(2).Value
     End With
     '--- success
     pvIsConnAlive = True
@@ -246,11 +244,11 @@ Attribute CompleteTimerProc.VB_MemberFlags = "40"
     sHandle = C_Str(pRecordset!Handle.Value)
     If C_Lng(pRecordset!Result.Value) = 0 And LenB(sHandle) <> 0 Then
         If m_oCallback.frHandleRequest(C_Str(pRecordset!SvcName.Value), C_Str(pRecordset!Request.Value), sResponse, lErrorCode) Then
-            m_oConn.Execute Printf(STR_SEND_ON_CONV, Quote(sHandle), Quote(sResponse))
+            m_oConn.Execute Printf(STR_SEND_ON_CONV, Quote(sHandle), Quote(sResponse)), Options:=adCmdText Or adExecuteNoRecords
         Else
             lErrorCode = Znl(lErrorCode, 500)
             m_oConn.Execute Printf(STR_END_CONV_WITH_ERROR, Quote(sHandle), lErrorCode, _
-                Quote(Zn(sResponse, Printf(ERR_UNKNOWN, lErrorCode))))
+                Quote(Zn(sResponse, Printf(ERR_UNKNOWN, lErrorCode)))), Options:=adCmdText Or adExecuteNoRecords
         End If
     ElseIf C_Lng(pRecordset!Result.Value) <> 99 Then
         sResponse = C_Str(pRecordset!ErrorText.Value)
@@ -311,7 +309,7 @@ NextLine:
         If LenB(sHandle) <> 0 Then
             lErrorCode = 500
             m_oConn.Execute Printf(STR_END_CONV_WITH_ERROR, Quote(sHandle), lErrorCode, _
-                Quote(Zn(m_sLastError, Printf(ERR_UNKNOWN, lErrorCode))))
+                Quote(Zn(m_sLastError, Printf(ERR_UNKNOWN, lErrorCode)))), Options:=adCmdText Or adExecuteNoRecords
         End If
         pvQueueLoopAsync
     Else
@@ -339,4 +337,8 @@ End Function
 
 Private Function IQueue_Terminate() As Boolean
     IQueue_Terminate = pvQueueTerminate
+End Function
+
+Private Function IQueue_IsConversationAlive() As Boolean
+    IQueue_IsConversationAlive = True
 End Function

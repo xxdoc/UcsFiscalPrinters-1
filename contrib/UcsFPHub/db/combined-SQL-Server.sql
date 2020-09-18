@@ -15,7 +15,7 @@ CREATE PROC usp_sys_ServiceBrokerSetupService (
 ) WITH EXECUTE AS OWNER AS
 /*------------------------------------------------------------------------
 '
-' UcsFPHub (c) 2019 by Unicontsoft
+' UcsFPHub (c) 2019-2020 by Unicontsoft
 '
 ' Unicontsoft Fiscal Printers Hub
 '
@@ -41,13 +41,13 @@ SELECT      @Mode = COALESCE(@Mode, '')
             , @QueueName = COALESCE(@QueueName, @Prefix + N'Queue/' + @Suffix)
             , @SvcName = COALESCE(@SvcName, @Prefix + N'Service/' + @Suffix)
 
-IF EXISTS (SELECT * FROM sys.databases WHERE database_id = DB_ID() AND is_broker_enabled = 0)
+IF EXISTS (SELECT 0 FROM sys.databases WHERE database_id = DB_ID() AND is_broker_enabled = 0)
 BEGIN
-            SET         @SQL = N'ALTER DATABASE ' + QUOTENAME(DB_NAME()) + N' SET ENABLE_BROKER WITH ROLLBACK IMMEDIATE'
+            SET         @SQL = N'BEGIN TRY ALTER DATABASE ' + QUOTENAME(DB_NAME()) + N' SET ENABLE_BROKER WITH ROLLBACK IMMEDIATE END TRY BEGIN CATCH END CATCH'
             EXEC        (@SQL)
 END
 
-IF EXISTS (SELECT * FROM sys.services WHERE name = @SvcName) AND @Mode IN ('DROP_SERVICE', 'DROP_EXISTING', 'DROP_ONLY')
+IF EXISTS (SELECT 0 FROM sys.services WHERE name = @SvcName) AND @Mode IN ('DROP_SERVICE', 'DROP_EXISTING', 'DROP_ONLY')
 BEGIN
             SET         @CrsClean = CURSOR FAST_FORWARD FOR 
             SELECT      conversation_handle 
@@ -67,11 +67,14 @@ BEGIN
             CLOSE       @CrsClean
             DEALLOCATE  @CrsClean
 
-            SET         @SQL = N'DROP SERVICE ' + QUOTENAME(@SvcName)
-            EXEC        (@SQL)
+            IF  EXISTS (SELECT 0 FROM sys.services WHERE name = @SvcName)
+            BEGIN
+                        SET         @SQL = N'DROP SERVICE ' + QUOTENAME(@SvcName)
+                        EXEC        (@SQL)
+            END
 END
 
-IF EXISTS (SELECT * FROM sys.service_queues WHERE SCHEMA_NAME(schema_id) = N'dbo' AND name = @QueueName) AND @Mode IN ('DROP_EXISTING', 'DROP_ONLY')
+IF EXISTS (SELECT 0 FROM sys.service_queues WHERE SCHEMA_NAME(schema_id) = N'dbo' AND name = @QueueName) AND @Mode IN ('DROP_EXISTING', 'DROP_ONLY')
 BEGIN
             SET         @CrsClean = CURSOR FAST_FORWARD FOR 
             SELECT      name
@@ -85,30 +88,39 @@ BEGIN
                         FETCH NEXT  FROM @CrsClean INTO @Name
                         IF          @@FETCH_STATUS <> 0 BREAK
 
-                        SET         @SQL = N'DROP SERVICE ' + QUOTENAME(@Name)
-                        EXEC        (@SQL)
+                        IF  EXISTS (SELECT 0 FROM sys.services WHERE name = @Name)
+                        BEGIN
+                                    SET         @SQL = N'DROP SERVICE ' + QUOTENAME(@Name)
+                                    EXEC        (@SQL)
+                        END
             END
 
             CLOSE       @CrsClean
             DEALLOCATE  @CrsClean
 
-            SET         @SQL = N'DROP QUEUE dbo.' + QUOTENAME(@QueueName)
-            EXEC        (@SQL)
+            IF EXISTS (SELECT 0 FROM sys.service_queues WHERE SCHEMA_NAME(schema_id) = N'dbo' AND name = @QueueName)
+            BEGIN
+                        SET         @SQL = N'DROP QUEUE dbo.' + QUOTENAME(@QueueName)
+                        EXEC        (@SQL)
+            END
 END
 
-IF NOT EXISTS (SELECT * FROM sys.service_queues WHERE SCHEMA_NAME(schema_id) = N'dbo' AND name = @QueueName) AND @Mode NOT IN ('DROP_ONLY')
+IF          @Mode NOT IN ('DROP_ONLY')
 BEGIN
-            SET         @SQL = N'CREATE QUEUE dbo.' + QUOTENAME(@QueueName)
-            EXEC        (@SQL)
+            IF NOT EXISTS (SELECT 0 FROM sys.service_queues WHERE SCHEMA_NAME(schema_id) = N'dbo' AND name = @QueueName)
+            BEGIN
+                        SET         @SQL = N'CREATE QUEUE dbo.' + QUOTENAME(@QueueName)
+                        EXEC        (@SQL)
 
-            SET         @SQL = N'GRANT RECEIVE ON dbo.' + QUOTENAME(@QueueName) + N' TO public'
-            EXEC        (@SQL)
-END
+                        SET         @SQL = N'GRANT RECEIVE ON dbo.' + QUOTENAME(@QueueName) + N' TO public'
+                        EXEC        (@SQL)
+            END
 
-IF NOT EXISTS (SELECT * FROM sys.services WHERE name = @SvcName) AND @Mode NOT IN ('DROP_ONLY')
-BEGIN
-            SET         @SQL = N'CREATE SERVICE ' + QUOTENAME(@SvcName) + N' ON QUEUE dbo.' + QUOTENAME(@QueueName) + N' ([DEFAULT])'
-            EXEC        (@SQL)
+            IF NOT EXISTS (SELECT 0 FROM sys.services WHERE name = @SvcName)
+            BEGIN
+                        SET         @SQL = N'CREATE SERVICE ' + QUOTENAME(@SvcName) + N' ON QUEUE dbo.' + QUOTENAME(@QueueName) + N' ([DEFAULT])'
+                        EXEC        (@SQL)
+            END
 END
 GO
 IF OBJECT_ID('usp_sys_ServiceBrokerSend') IS NOT NULL DROP PROC usp_sys_ServiceBrokerSend
@@ -194,7 +206,7 @@ CREATE PROC usp_sys_ServiceBrokerSend (
 ) AS
 /*------------------------------------------------------------------------
 '
-' UcsFPHub (c) 2019 by Unicontsoft
+' UcsFPHub (c) 2019-2020 by Unicontsoft
 '
 ' Unicontsoft Fiscal Printers Hub
 '
@@ -238,8 +250,14 @@ BEGIN
 
                         IF          @Request IS NULL
                         BEGIN
-                                    ; SEND ON   CONVERSATION @Handle (N'__FIN__')
-                                    ; END       CONVERSATION @Handle
+                                    IF EXISTS ( SELECT      *
+                                                FROM        sys.conversation_endpoints
+                                                WHERE       conversation_handle = @Handle AND state NOT IN ('CD', 'ER') )
+                                    BEGIN
+                                                ; SEND ON   CONVERSATION @Handle (N'__FIN__')
+                                                ; END       CONVERSATION @Handle
+                                    END
+
                                     GOTO        QH
                         END
 
@@ -255,6 +273,11 @@ BEGIN
 
                         IF          @Response = N'__PONG__'
                         BEGIN
+                                    IF          @Request = N'__PING__'
+                                    BEGIN
+                                                GOTO        QH
+                                    END
+
                                     SET         @IsAck = 0
                                     ; SEND ON   CONVERSATION @Handle (@Request)
 
@@ -269,31 +292,24 @@ BEGIN
 
                                     IF          @MsgType = 'DEFAULT'
                                     BEGIN
-                                                IF          @Request = N'__PING__' AND @Response = N'__PONG__'
+                                                IF          @IsAck = 0 OR LEFT(@Response, 2) = N'__'
                                                 BEGIN
-                                                            GOTO        QH
-                                                END
-
-                                                IF          @IsAck = 0
-                                                BEGIN
-                                                            IF          @Response <> N'__ACK__'
+                                                            IF          @Response = N'__ACK__'
                                                             BEGIN
-                                                                        GOTO        RepeatWait
+                                                                        SET         @IsAck = 1
                                                             END
 
-                                                            SET         @IsAck = 1
                                                             GOTO        RepeatWait
                                                 END
 
-                                                IF          LEFT(@Response, 2) <> N'__'
-                                                            BREAK
+                                                BREAK
                                     END
                         END
             END TRY
             BEGIN CATCH
                         --PRINT { fn CURRENT_TIMESTAMP } + ': ERROR_MESSAGE=' + ERROR_MESSAGE()
 
-                        IF          @Handle IS NOT NULL AND ERROR_NUMBER() <> 8426  -- The conversation handle "%s" is not found.
+                        IF          @Handle IS NOT NULL AND ERROR_NUMBER() <> 8426 -- The conversation handle "%s" is not found.
                         BEGIN
                                     ; END       CONVERSATION @Handle
                         END
@@ -374,7 +390,7 @@ CREATE PROC usp_sys_ServiceBrokerWaitRequest (
 ) AS
 /*------------------------------------------------------------------------
 '
-' UcsFPHub (c) 2019 by Unicontsoft
+' UcsFPHub (c) 2019-2020 by Unicontsoft
 '
 ' Unicontsoft Fiscal Printers Hub
 '
@@ -386,9 +402,17 @@ SET         NOCOUNT ON
 
 DECLARE     @RetVal         INT
             , @SQL          NVARCHAR(MAX)
+            , @State        VARCHAR(50)
 
 SELECT      @RetVal = 0
             , @Timeout = COALESCE(@Timeout, 5000)
+
+IF NOT EXISTS (SELECT 0 FROM sys.service_queues WHERE SCHEMA_NAME(schema_id) = N'dbo' AND name = @QueueName)
+BEGIN
+            SELECT      @RetVal = 2
+                        , @ErrorText = N'Queue not found'
+            GOTO        QH
+END
 
 SELECT      @SQL = N'
 WAITFOR (   RECEIVE     TOP (1) @Handle = conversation_handle 
@@ -397,7 +421,8 @@ WAITFOR (   RECEIVE     TOP (1) @Handle = conversation_handle
                         , @SvcName = service_name
             FROM        dbo.' + QUOTENAME(@QueueName) + N'  ), TIMEOUT ' + CONVERT(NVARCHAR(50), @Timeout)
 RepeatWait:
-SELECT      @Handle = NULL, @Request = NULL, @MsgType = NULL, @SvcName = NULL, @ErrorText = NULL
+BEGIN TRAN
+SELECT      @Handle = NULL, @Request = NULL, @MsgType = NULL, @SvcName = NULL, @ErrorText = NULL, @State = NULL
 EXEC        dbo.sp_executesql @SQL
                 , N'@Handle UNIQUEIDENTIFIER OUTPUT, @Request NVARCHAR(MAX) OUTPUT, @MsgType SYSNAME OUTPUT, @SvcName SYSNAME OUTPUT'
                 , @Handle OUTPUT, @Request OUTPUT, @MsgType OUTPUT, @SvcName OUTPUT
@@ -405,6 +430,7 @@ EXEC        dbo.sp_executesql @SQL
 IF          @Handle IS NULL
 BEGIN
             --PRINT { fn CURRENT_TIMESTAMP() } + ': Timeout'
+            ROLLBACK
 
             SELECT      @RetVal = 99
                         , @ErrorText = N'Timeout'
@@ -413,9 +439,10 @@ END
                         
 IF          @MsgType = 'http://schemas.microsoft.com/SQL/ServiceBroker/EndDialog'
 BEGIN
-            --PRINT { fn CURRENT_TIMESTAMP() } + ': Closed by ' + @MsgType
+            --PRINT { fn CURRENT_TIMESTAMP() } + ': Conversation closed by ' + @MsgType
 
             ; END       CONVERSATION @Handle
+            COMMIT
 
             GOTO        RepeatWait
 END
@@ -423,6 +450,7 @@ END
 IF          @MsgType = 'http://schemas.microsoft.com/SQL/ServiceBroker/Error'
 BEGIN
             ; END       CONVERSATION @Handle
+            COMMIT
 
             SELECT      @RetVal = 1
                         , @ErrorText = LEFT(CONVERT(XML, @Request).value('declare namespace ns="http://schemas.microsoft.com/SQL/ServiceBroker/Error";
@@ -430,11 +458,26 @@ BEGIN
             GOTO        QH
 END
 
-IF          @Request = N'__FIN__'
+SELECT      @State = state
+FROM        sys.conversation_endpoints
+WHERE       conversation_handle = @Handle
+
+IF          @State IN ('DI', 'DO', 'ER')
 BEGIN
-            --PRINT { fn CURRENT_TIMESTAMP() } + ': Conversation closed'
+            --PRINT { fn CURRENT_TIMESTAMP() } + ': Conversation closed by state ' + @State
 
             ; END       CONVERSATION @Handle
+            COMMIT
+
+            GOTO        RepeatWait
+END
+
+IF          @Request = N'__FIN__'
+BEGIN
+            --PRINT { fn CURRENT_TIMESTAMP() } + ': Conversation closed by __FIN__'
+
+            ; END       CONVERSATION @Handle
+            COMMIT
 
             GOTO        RepeatWait
 END
@@ -444,11 +487,13 @@ BEGIN
             --PRINT { fn CURRENT_TIMESTAMP() } + ': Ping reply send'
 
             ; SEND ON CONVERSATION @Handle (N'__PONG__')
+            COMMIT
 
             GOTO        RepeatWait
 END
 
 ; SEND ON   CONVERSATION @Handle (N'__ACK__')
+COMMIT
 
 QH:
 RETURN      @RetVal

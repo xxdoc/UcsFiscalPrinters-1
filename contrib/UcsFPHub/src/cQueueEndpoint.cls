@@ -75,6 +75,7 @@ Private Const ERR_INVALID_XML           As String = "Невалиден XML"
 '--- defaults
 Private Const DEF_MSSQL_TIMEOUT         As Long = 15000
 Private Const DEF_MYSQL_TIMEOUT         As Long = 5000
+Private Const DEF_ASYNC_COMMAND_TIMEOUT As Long = 12& * 3600 '--- 12h
 '--- params
 Private Const PRM_SQLSERVER             As String = "SqlServer"
 Private Const PRM_DBUSER                As String = "DbUser"
@@ -97,7 +98,8 @@ Private m_pTimer                    As IUnknown
 Private m_oConn                     As ADODB.Connection
 Attribute m_oConn.VB_VarHelpID = -1
 Private m_oRecvConn                 As ADODB.Connection
-Private m_oController               As cServiceController
+Private WithEvents m_oController    As cServiceController
+Attribute m_oController.VB_VarHelpID = -1
 Private m_oSshTunnel                As cExec
 Private m_lSshLocalPort             As Long
 Private m_dSshLastAccess            As Date
@@ -175,7 +177,7 @@ Public Function Init(oConfig As Object, oPrinters As Object) As Boolean
     End If
     '--- sync devices date/time if needed
     If Not IsEmpty(JsonItem(oConfig, "SyncDateTimeAdjustTolerance")) Then
-        dClock = m_oConn.Execute("SELECT GETDATE()").Fields(0).Value
+        dClock = m_oConn.Execute("SELECT GETDATE()", Options:=adCmdText).Fields(0).Value
         pvSyncDateTime dClock, C_Lng(JsonItem(oConfig, "SyncDateTimeAdjustTolerance"))
     End If
     '--- init Service Broker queue
@@ -253,11 +255,8 @@ Friend Function frHandleRequest(sSvcName As String, sRequest As String, sRespons
     End If
     vSplit = Split(sSvcName, "/")
     If UBound(vSplit) = 1 Then
-        sPrinterID = At(vSplit, 1)
-        If LenB(sPrinterID) = 0 Then
-            lErrorCode = 400
-            sResponse = Printf(ERR_INVALID_SERVICE, sSvcName)
-            GoTo QH
+        If Not IsOnlyDigits(At(vSplit, 1)) Then
+            sPrinterID = At(vSplit, 1)
         End If
     End If
     If Left$(sRequest, 1) = "<" Then
@@ -472,15 +471,19 @@ Private Function pvOpenConn(oConfig As Object) As Boolean
     Set m_oConn = New ADODB.Connection
     m_oConn.CursorLocation = adUseClient
     m_oConn.Open sLocalConnStr
-    m_oConn.CommandTimeout = m_oConn.ConnectionTimeout * 2
+    If Not IsEmpty(JsonItem(oConfig, "CommandTimeout")) Then
+        m_oConn.CommandTimeout = C_Lng(JsonItem(oConfig, "CommandTimeout"))
+    Else
+        m_oConn.CommandTimeout = m_oConn.ConnectionTimeout * 2
+    End If
     Select Case LCase$(JsonItem(oConfig, "Binding"))
     Case "mssqlservicebroker"
-        With m_oConn.Execute("SELECT @@SERVERNAME, DB_NAME()")
+        With m_oConn.Execute("SELECT @@SERVERNAME, DB_NAME()", Options:=adCmdText)
             m_sSqlInstance = .Fields.Item(0).Value
             m_sSqlDatabase = .Fields.Item(1).Value
         End With
     Case "mysqlmessagequeue"
-        With m_oConn.Execute("SELECT @@HOSTNAME, DATABASE();")
+        With m_oConn.Execute("SELECT @@HOSTNAME, DATABASE();", Options:=adCmdText)
             m_sSqlInstance = .Fields.Item(0).Value
             m_sSqlDatabase = .Fields.Item(1).Value
         End With
@@ -488,7 +491,11 @@ Private Function pvOpenConn(oConfig As Object) As Boolean
     Set m_oRecvConn = New ADODB.Connection
     m_oRecvConn.CursorLocation = adUseClient
     m_oRecvConn.Open sLocalConnStr
-    m_oRecvConn.CommandTimeout = 0
+    If Not IsEmpty(JsonItem(oConfig, "AsyncCommandTimeout")) Then
+        m_oRecvConn.CommandTimeout = C_Lng(JsonItem(oConfig, "AsyncCommandTimeout"))
+    Else
+        m_oRecvConn.CommandTimeout = DEF_ASYNC_COMMAND_TIMEOUT
+    End If
     DebugLog MODULE_NAME, FUNC_NAME, Printf(IIf(bReopen, STR_CONN_REOPEN, STR_CONN_OPEN), m_sSqlInstance, m_sSqlDatabase)
     '--- success
     pvOpenConn = True
@@ -753,6 +760,23 @@ Private Function pvSetConnProp(ByVal sConnStr As String, sProp As String, sValue
     JsonItem(oMap, sProp) = Zn(sValue, Empty)
     pvSetConnProp = ToConnectString(oMap)
 End Function
+
+'=========================================================================
+' Events
+'=========================================================================
+
+Private Sub m_oController_BeforeCommitReceipt(oCtx As Object, Cancel As Boolean)
+    Const FUNC_NAME     As String = "m_oController_BeforeCommitReceipt"
+    
+    On Error GoTo EH
+    If Not m_oQueue.IsConversationAlive() Then
+        Cancel = True
+    End If
+    Exit Sub
+EH:
+    PrintError FUNC_NAME
+End Sub
+
 '=========================================================================
 ' Base class events
 '=========================================================================

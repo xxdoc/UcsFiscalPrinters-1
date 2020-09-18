@@ -81,7 +81,7 @@ CREATE PROC usp_sys_ServiceBrokerSend (
 ) AS
 /*------------------------------------------------------------------------
 '
-' UcsFPHub (c) 2019 by Unicontsoft
+' UcsFPHub (c) 2019-2020 by Unicontsoft
 '
 ' Unicontsoft Fiscal Printers Hub
 '
@@ -125,8 +125,14 @@ BEGIN
 
                         IF          @Request IS NULL
                         BEGIN
-                                    ; SEND ON   CONVERSATION @Handle (N'__FIN__')
-                                    ; END       CONVERSATION @Handle
+                                    IF EXISTS ( SELECT      *
+                                                FROM        sys.conversation_endpoints
+                                                WHERE       conversation_handle = @Handle AND state NOT IN ('CD', 'ER') )
+                                    BEGIN
+                                                ; SEND ON   CONVERSATION @Handle (N'__FIN__')
+                                                ; END       CONVERSATION @Handle
+                                    END
+
                                     GOTO        QH
                         END
 
@@ -142,6 +148,11 @@ BEGIN
 
                         IF          @Response = N'__PONG__'
                         BEGIN
+                                    IF          @Request = N'__PING__'
+                                    BEGIN
+                                                GOTO        QH
+                                    END
+
                                     SET         @IsAck = 0
                                     ; SEND ON   CONVERSATION @Handle (@Request)
 
@@ -156,31 +167,24 @@ BEGIN
 
                                     IF          @MsgType = 'DEFAULT'
                                     BEGIN
-                                                IF          @Request = N'__PING__' AND @Response = N'__PONG__'
+                                                IF          @IsAck = 0 OR LEFT(@Response, 2) = N'__'
                                                 BEGIN
-                                                            GOTO        QH
-                                                END
-
-                                                IF          @IsAck = 0
-                                                BEGIN
-                                                            IF          @Response <> N'__ACK__'
+                                                            IF          @Response = N'__ACK__'
                                                             BEGIN
-                                                                        GOTO        RepeatWait
+                                                                        SET         @IsAck = 1
                                                             END
 
-                                                            SET         @IsAck = 1
                                                             GOTO        RepeatWait
                                                 END
 
-                                                IF          LEFT(@Response, 2) <> N'__'
-                                                            BREAK
+                                                BREAK
                                     END
                         END
             END TRY
             BEGIN CATCH
                         --PRINT { fn CURRENT_TIMESTAMP } + ': ERROR_MESSAGE=' + ERROR_MESSAGE()
 
-                        IF          @Handle IS NOT NULL AND ERROR_NUMBER() <> 8426  -- The conversation handle "%s" is not found.
+                        IF          @Handle IS NOT NULL AND ERROR_NUMBER() <> 8426 -- The conversation handle "%s" is not found.
                         BEGIN
                                     ; END       CONVERSATION @Handle
                         END

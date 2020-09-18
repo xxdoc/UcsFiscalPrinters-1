@@ -128,6 +128,7 @@ Private Declare Function CloseHandle Lib "kernel32" (ByVal hObject As Long) As L
 Private Declare Function CreateEvent Lib "kernel32" Alias "CreateEventA" (ByVal lpEventAttributes As Long, ByVal bManualReset As Long, ByVal bInitialState As Long, ByVal lpName As Long) As Long
 Private Declare Function WaitForMultipleObjects Lib "kernel32" (ByVal nCount As Long, lpHandles As Long, ByVal bWaitAll As Long, ByVal dwMilliseconds As Long) As Long
 Private Declare Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As Long)
+Private Declare Function vbaObjSetAddref Lib "msvbvm60" Alias "__vbaObjSetAddref" (oDest As Any, ByVal lSrcPtr As Long) As Long
 
 Private Type OVERLAPPED
     Internal                    As Long
@@ -141,7 +142,7 @@ End Type
 ' Constants and member variables
 '=========================================================================
 
-Private Const STR_INTERNAL              As String = "Timeout waiting for response|Invalid message format or checksum (NACK)|Invalid response length: %1|Invalid response checksum: %1|Response missing preamble: %1|No receipt started|Error in line %1: %2|Invalid report type|Device not online|Device not ready| or cannot set operator password|Unsupported payment type %1|Barcode type %1 not supported|Cannot print|Wrong invoice number %1 generated|Unsupported discount type %1"
+Private Const STR_INTERNAL              As String = "Timeout waiting for response|Invalid message format or checksum (NACK)|Invalid response length: %1|Invalid response checksum: %1|Response missing preamble: %1|No receipt started|Error in line %1: %2|Invalid report type|Device not online|Device not ready| or cannot set operator password|Unsupported payment type %1|Barcode type %1 not supported|Cannot print|Wrong invoice number %1 generated|Unsupported discount type %1|Commit receipt cancelled"
 Private Const STR_STATUSES              As String = "Unknown error|Invalid command|Illegal command|Command denied because of uncommited report|Syntax error|Input register overflow|Input register is zero|Missing transaction for void|Insufficient subtotal|Tax groups conflict"
 Private Const STR_ERRORS                As String = "Unknown error|Out of paper|Daily registers overflow|Clock not adjusted|Fiscal receipt open|Receipt not fully paid|Non-fiscal receipt open|Receipt already paid out|Read-only fiscal memory|Bad password or command not allowed|Display missing|24 hours without daily report|Printer overheated|Power down|Electronic journal overflow|Not enough conditions met"
 Private Const STR_RECEIPT_TEXTS         As String = "Cash|Card|Bank|Surcharge%1|Discount%1|Subtotal|Sales %1|EIC;Citizen #;Foreigner #;Official #"
@@ -189,6 +190,7 @@ Private Const IDX_EURO_RATE             As Long = 12
 Private Const IDX_CODE_PAYM1            As Long = 6
 
 Private m_sDevice                   As String
+Private m_lEventSinkPtr             As Long
 Private m_oConnector                As IDeviceConnector
 Private m_lConnectionTimeout        As Long
 Private m_lCommandTimeout           As Long
@@ -217,6 +219,7 @@ Private Enum UcsInternalErrors
     ucsErrCannotPrint
     ucsErrWrongInvoiceNo
     ucsErrUnsupportedDiscType
+    ucsErrCommitReceiptCancelled
 End Enum
 
 Private Enum UcsDeviceErrorsAndStatuses
@@ -483,6 +486,10 @@ Private Property Get pvExtendedPmtTypes() As Boolean
     End If
 End Property
 
+Private Property Get pvEventSink() As Object
+    Call vbaObjSetAddref(pvEventSink, m_lEventSinkPtr)
+End Property
+
 '=========================================================================
 ' Methods
 '=========================================================================
@@ -577,15 +584,16 @@ EH:
     RaiseError FUNC_NAME
 End Function
 
-Public Function Init(sDeviceString As String) As Boolean
+Public Function Init(sDeviceString As String, Optional EventSink As Object) As Boolean
     Const FUNC_NAME     As String = "Init"
     Dim oOptions        As Object
     Dim sDeviceSerialNo As String
     Dim sError          As String
     
     On Error GoTo EH
-    DebugLog FUNC_NAME, "sDeviceString=" & sDeviceString
+    DebugLog FUNC_NAME, "sDeviceString=" & sDeviceString & ", EventSink=&H" & Hex$(ObjPtr(EventSink))
     pvSetLastError vbNullString
+    m_lEventSinkPtr = ObjPtr(EventSink)
     Set oOptions = ParseDeviceString(sDeviceString)
     m_lConnectionTimeout = C_Lng(JsonItem(oOptions, "ConnectionTimeout"))
     If m_lConnectionTimeout <= 0 Then
@@ -727,7 +735,7 @@ Public Function WaitDevice(Optional ByVal Timeout As Long) As Boolean
     Dim eCmd            As UcsTremolCommandsEnum
     Dim sParam          As String
     Dim lStatus         As Long
-    Dim dblTimer        As Double
+    Dim dblTimerEx      As Double
     Dim sCurrent        As String
     Dim sOuter          As String
     Dim lIter           As Long
@@ -736,8 +744,8 @@ Public Function WaitDevice(Optional ByVal Timeout As Long) As Boolean
     On Error GoTo EH
     pvSetLastError vbNullString
     Timeout = Znl(Timeout, m_lCommandTimeout)
-    dblTimer = TimerEx + Timeout / 1000#
-    Do While TimerEx < dblTimer
+    dblTimerEx = TimerEx + Timeout / 1000#
+    Do While TimerEx < dblTimerEx
         lIter = lIter + 1
         pvGetCommandConfig CONF_NAME, "FastIsOnline", eCmd, ucsZekCmdFastIsOnline, sParam, vbNullString, _
             "Status", lStatus, ucsZekCmdFastIsOnline
@@ -1115,17 +1123,18 @@ Public Function GetLastInvoiceNo() As String
     Dim eCmd            As UcsTremolCommandsEnum
     Dim sParam          As String
     Dim lIndex          As Long
+    Dim lOffset         As Long
     Dim vSplit          As Variant
     
     On Error GoTo EH
     pvGetCommandConfig CONF_NAME, "InfoInvoiceNo", eCmd, ucsZekCmdInfoInvoiceNo, sParam, vbNullString, _
-        "Index", lIndex, 0
+        "Index", lIndex, 0, _
+        "Offset", lOffset, 1
     vSplit = Split(SendCommand(eCmd, sParam, LogName:=FUNC_NAME), DEF_SEP)
-    If Not IsNumeric(At(vSplit, lIndex)) Then
-        GoTo QH
+    GetLastInvoiceNo = At(vSplit, lIndex)
+    If lOffset <> 0 And IsNumeric(GetLastInvoiceNo) And At(vSplit, lIndex) <> At(vSplit, lIndex + 1) Then
+        GetLastInvoiceNo = Val(GetLastInvoiceNo) - lOffset
     End If
-    '--- success
-    GetLastInvoiceNo = C_Dbl(At(vSplit, lIndex)) - 1
 QH:
     Exit Function
 EH:
@@ -1863,7 +1872,11 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
     Dim lPrintType      As Long
     Dim vElem           As Variant
     Dim dLastDate       As Date
+    Dim lReceiptNoIndex As Long
     Dim sVatIndexes     As String
+    Dim bNeedCommit     As Boolean
+    Dim oCtx            As Object
+    Dim bCancel         As Boolean
     
     On Error GoTo EH
     '--- ring sale
@@ -2132,7 +2145,9 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
         Case ucsRowPayment
             pvGetCommandConfig CONF_NAME, "InfoTransaction", eCmd, ucsZekCmdInfoTransaction, sParam, vbNullString, _
                 "Index", lIndex, 0, _
-                "StatusClose", lStatusClosed, 0
+                "StatusClose", lStatusClosed, 0, _
+                "ReceiptNoIndex", lReceiptNoIndex, 19, _
+                "VatIndexes", sVatIndexes, "2|3|4|14|15|16|17|18"
             vSplit = Split(SendCommand(eCmd, sParam, LogName:=FUNC_NAME), DEF_SEP)
             If LenB(m_uPrintData.LastError) <> 0 Then
                 GoTo QH
@@ -2155,12 +2170,16 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
                         "FormatAmount", sFormatAmount, FORMAT_BASE_2, _
                         "FormatZero", sFormatZero, "\"""
                     sParam = Printf(sParam, SafeFormat(.PmtAmount, IIf(Abs(.PmtAmount) < DBL_EPSILON, sFormatZero, sFormatAmount)))
+                    If Not (m_uConfig.DelayPrint Or m_uConfig.BufferPrint) Then
+                        bNeedCommit = True
+                    End If
                 End If
             Else
-                pvGetCommandConfig CONF_NAME, "FiscalPayAndClose", eCmd, ucsZekCmdFiscalPayAndClose, sParam, vbNullString, _
-                    "Index", lIndex, 19, _
-                    "VatIndexes", sVatIndexes, "2|3|4|14|15|16|17|18"
-                uCtx.ReceiptNo = RTrim$(At(vSplit, lIndex))
+                pvGetCommandConfig CONF_NAME, "FiscalPayAndClose", eCmd, ucsZekCmdFiscalPayAndClose, sParam, vbNullString
+                bNeedCommit = True
+            End If
+            If Not uCtx.CommitSent And bNeedCommit Then
+                uCtx.ReceiptNo = RTrim$(At(vSplit, lReceiptNoIndex))
                 uCtx.ReceiptDate = pvRawGetClock()
                 dblTotal = 0
                 For Each vElem In Split(sVatIndexes, "|")
@@ -2172,6 +2191,19 @@ Private Function pvPrintReceipt(uCtx As UcsPpdExecuteContext, uRow() As UcsPpdRo
                     dblTotal = -dblTotal
                 End Select
                 uCtx.ReceiptAmount = dblTotal
+                If m_lEventSinkPtr <> 0 Then
+                    Set oCtx = Nothing
+                    JsonItem(oCtx, "ReceiptNo") = uCtx.ReceiptNo
+                    JsonItem(oCtx, "ReceiptDate") = uCtx.ReceiptDate
+                    JsonItem(oCtx, "ReceiptAmount") = uCtx.ReceiptAmount
+                    JsonItem(oCtx, "InvoiceNo") = uCtx.InvoiceNo
+                    pvEventSink.OnBeforeCommitReceipt oCtx, bCancel
+                    If bCancel Then
+                        pvSetLastError pvInternal(ucsErrCommitReceiptCancelled)
+                        GoTo QH
+                    End If
+                End If
+                uCtx.CommitSent = True
             End If
             SendCommand eCmd, sParam, LogName:=FUNC_NAME
             If LenB(m_uPrintData.LastError) <> 0 Then
@@ -2201,12 +2233,12 @@ Private Function pvRawIsDeviceReady(oConnector As IDeviceConnector, ByVal lTimeo
     Dim eCmd            As UcsTremolCommandsEnum
     Dim sParam          As String
     Dim lStatus         As Long
-    Dim dblTimer        As Double
+    Dim dblTimerEx      As Double
     Dim sCurrent        As String
     Dim lIter           As Long
     
     On Error GoTo EH
-    dblTimer = TimerEx + lTimeout / 1000#
+    dblTimerEx = TimerEx + lTimeout / 1000#
     Do
         lIter = lIter + 1
         pvGetCommandConfig CONF_NAME, "FastIsOnline", eCmd, ucsZekCmdFastIsOnline, sParam, vbNullString, _
@@ -2218,7 +2250,7 @@ Private Function pvRawIsDeviceReady(oConnector As IDeviceConnector, ByVal lTimeo
             End If
             Exit Do
         End If
-    Loop While TimerEx < dblTimer
+    Loop While TimerEx < dblTimerEx
     If InStr(sCurrent, Chr$(lStatus)) = 0 Then
         Error = pvInternal(ucsErrDeviceNotOnline)
         GoTo QH
@@ -2235,7 +2267,7 @@ Private Function pvRawIsDeviceReady(oConnector As IDeviceConnector, ByVal lTimeo
             End If
             Exit Do
         End If
-    Loop While TimerEx < dblTimer
+    Loop While TimerEx < dblTimerEx
     Do While LenB(sCurrent) <> 0
         Select Case Asc(sCurrent)
         Case lStatus '--- STA_READY
@@ -2671,8 +2703,8 @@ Private Function IDeviceProtocol_GetTotalsStats() As Variant
     IDeviceProtocol_GetTotalsStats = GetTotalsStats()
 End Function
 
-Private Function IDeviceProtocol_Init(DeviceString As String) As Boolean
-    IDeviceProtocol_Init = Init(DeviceString)
+Private Function IDeviceProtocol_Init(DeviceString As String, Optional EventSink As Object) As Boolean
+    IDeviceProtocol_Init = Init(DeviceString, EventSink)
 End Function
 
 Private Property Get IDeviceProtocol_IsConnected() As Boolean
